@@ -2,6 +2,14 @@ name: seal-build
 
 on:
   workflow_dispatch:
+    inputs:
+      test-filter:
+        description: >
+          Space-separated Go test names to run instead of the whole suite. When
+          set, only those tests run and the scenario legs are skipped; empty runs
+          everything.
+        required: false
+        default: ''
 
 jobs:
   pack:
@@ -141,9 +149,29 @@ jobs:
       # stretchr/testify. The rest of the tree pulls grpc/protobuf and
       # vishvananda/netlink, which is Linux-only, so a whole-tree run cannot
       # compile on macOS or Windows. The full suite runs on Travis (Linux).
+      # A `test-filter` narrows the run to the named tests, which is how a single
+      # patch is iterated on; every name has to show up in the output, so a name
+      # that matched nothing (renamed test, wrong package) fails the job instead
+      # of passing as an empty run.
       - name: Run pkg/packet tests
         shell: bash
-        run: go test -v -count=1 ./pkg/packet/...
+        env:
+          TEST_FILTER: ${{ inputs.test-filter }}
+        run: |
+          set -euo pipefail
+          filter=$(echo "$TEST_FILTER" | xargs)
+          if [ -z "$filter" ]; then
+            go test -v -count=1 ./pkg/packet/...
+            exit 0
+          fi
+          log=$(mktemp)
+          go test -v -count=1 -run "^(${filter// /|})\$" ./pkg/packet/... 2>&1 | tee "$log"
+          for name in $filter; do
+            grep -q "^=== RUN   $name\$" "$log" || {
+              echo "selected test did not run: $name"
+              exit 1
+            }
+          done
 
       - name: Remove synthesized module files
         if: always()
@@ -161,6 +189,9 @@ jobs:
   # ---------------------------------------------------------------------------
   scenario_image:
     name: Scenario image
+    # The scenario tests are Python, so a Go `test-filter` run has nothing to
+    # gain from them; they only run on an unfiltered (full) dispatch.
+    if: ${{ inputs.test-filter == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -228,6 +259,7 @@ jobs:
   scenario:
     name: Scenario (${{ matrix.test }})
     needs: scenario_image
+    if: ${{ inputs.test-filter == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:

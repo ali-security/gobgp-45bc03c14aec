@@ -116,3 +116,56 @@ func Test_RTRErrorReport(t *testing.T) {
 	// when it has both "erroneous PDU" and "Arbitrary Text"
 	verifyRTRMessage(t, NewRTRErrorReport(CORRUPT_DATA, errPDU, errText2))
 }
+
+// ParseRTR must reject a message shorter than the RTR header instead of
+// indexing past the end of it.
+func Test_ParseRTRShortMessage(t *testing.T) {
+	shortMessages := [][]byte{
+		nil,
+		{},
+		{0},
+		{0, RTR_SERIAL_NOTIFY},
+		{0, RTR_ERROR_REPORT, 0, 0},
+		make([]byte, RTR_MIN_LEN-1),
+	}
+
+	for _, data := range shortMessages {
+		var (
+			msg RTRMessage
+			err error
+		)
+		require.NotPanics(t, func() {
+			msg, err = ParseRTR(data)
+		}, "ParseRTR panicked on a %d byte message", len(data))
+		assert.Error(t, err, "ParseRTR accepted a %d byte message", len(data))
+		assert.Nil(t, msg)
+	}
+}
+
+// SplitRTR must wait for the whole message so that ParseRTR is never handed a
+// truncated one.
+func Test_SplitRTRIncompleteMessage(t *testing.T) {
+	buf, err := NewRTRSerialNotify(uint16(time.Now().Unix()), randUint32()).Serialize()
+	require.NoError(t, err)
+
+	// every incomplete prefix of a message asks for more data
+	for i := 0; i < len(buf); i++ {
+		advance, token, err := SplitRTR(buf[:i], false)
+		assert.NoError(t, err)
+		assert.Equal(t, 0, advance)
+		assert.Nil(t, token, "SplitRTR returned %d of %d bytes", i, len(buf))
+	}
+
+	// a declared length shorter than the RTR header is invalid
+	_, _, err = SplitRTR([]byte{0, RTR_SERIAL_NOTIFY, 0, 0, 0, 0, 0, RTR_MIN_LEN - 1}, false)
+	assert.Error(t, err)
+
+	// the message is handed over only once all of its bytes arrived
+	advance, token, err := SplitRTR(buf, false)
+	assert.NoError(t, err)
+	assert.Equal(t, len(buf), advance)
+	assert.Equal(t, buf, token)
+
+	_, err = ParseRTR(token)
+	assert.NoError(t, err)
+}
